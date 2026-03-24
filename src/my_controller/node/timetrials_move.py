@@ -1,0 +1,108 @@
+#! /usr/bin/env python3
+
+import rospy
+import cv2
+import numpy as np
+import sys
+
+from std_msgs.msg import String
+from geometry_msgs.msg import Twist
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge, CvBridgeError
+
+class linefollowing:
+    def __init__(self):
+       self.bridge = CvBridge()
+
+       #Set-up publisher subscriber relationship
+       self.pub_cmd = rospy.Publisher('/B1/cmd_vel', Twist, queue_size=1)
+       self.pub_score = rospy.Publisher('/score_tracker',String,queue_size=1)
+       self.image_sub = rospy.Subscriber('B1/rrbot/camera1/image_raw',Image,self.callback)
+
+       #start timer
+       rospy.sleep(1)
+       self.pub_score.publish("rover,123,0,aaaaaa")
+
+    def callback(self,data):
+       cmd = Twist()
+       p=150
+
+       #Attempts to convert image to something readable by cv2, if not possible throws 'e' for error
+       try:
+         cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
+       except CvBridgeError as e:
+         print(e)
+
+       height, width, _ = cv_image.shape
+   
+       #Threshold image and define FOV
+       blurred = cv2.medianBlur(cv_image, 5)
+       gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+       thresh = 95
+       _, img_bin = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY_INV)
+       
+       # 3. Create a kernel (the size of the 'eraser' or 'patch')
+       kernel = np.ones((5,5), np.uint8)
+
+       # 4. REMOVE DOTS: Opening
+       img_no_dots = cv2.morphologyEx(img_bin, cv2.MORPH_OPEN, kernel)
+
+       # 5. FILL SEAMS: Closing
+       img_final = cv2.morphologyEx(img_no_dots, cv2.MORPH_CLOSE, kernel)
+       
+       
+       FOV = img_final[int(0.9*height):height, :]
+       
+       #debug
+       cv2.imshow("Original Camera", cv_image)
+       cv2.imshow("Thresholded Image", img_final)
+       cv2.waitKey(1)
+
+       #Find max contours
+       contours, hierarchy = cv2.findContours(FOV, cv2.RETR_TREE,
+                                               cv2.CHAIN_APPROX_SIMPLE)
+       if len(contours) == 0:
+            cmd.linear.x = 0
+            cmd.angular.z = .5
+            try:
+              self.pub_cmd.publish(cmd)
+            except CvBridgeError as e:
+              print(e)
+            return
+                
+       else:
+            largest = max(contours, key=cv2.contourArea)
+            moment = cv2.moments(largest)
+            
+       if moment["m00"]==0:
+            cmd.linear.x = 0
+            cmd.angular.z = .5
+            try:
+              self.pub_cmd.publish(cmd)
+            except CvBridgeError as e:
+              print(e)
+            return
+       else:
+            centriod_x = int(moment["m10"] / moment["m00"])
+            centriod_y = int(moment["m01"] / moment["m00"])
+            centriod_y += int(0.9 * height)
+       
+
+       allign_to_centre = centriod_x-(width/2)
+
+       cmd.linear.x = .2
+       cmd.angular.z = -allign_to_centre/p
+
+       try:
+          self.pub_cmd.publish(cmd)
+       except CvBridgeError as e:
+          print(e)
+
+def main(args):
+   rospy.init_node('timetrials_move', anonymous=True)
+   lf = linefollowing()
+   rospy.spin()
+   
+
+if __name__ == '__main__':
+    main(sys.argv)          
