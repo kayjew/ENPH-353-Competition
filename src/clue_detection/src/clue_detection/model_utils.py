@@ -7,13 +7,12 @@ CHARS = string.digits + string.ascii_uppercase
 char_to_int = {char: i for i, char in enumerate(CHARS)}
 int_to_char = {i: char for i, char in enumerate(CHARS)}
 
-
 class BoardProcessor:
     def __init__(self, size=32):
         self.char_size = size
-        # Coordinates for the ROI
-        self.top_y1, self.top_y2, self.top_x1, self.top_x2 = 20,  130, 100, 490
-        self.bot_y1, self.bot_y2, self.bot_x1, self.bot_x2 = 150, 274,  40, 490
+        #coordinates after dewarping/cropping
+        self.top_y1, self.top_y2, self.top_x1, self.top_x2 = 45,  115, 200, 440
+        self.bot_y1, self.bot_y2, self.bot_x1, self.bot_x2 = 165, 265, 65, 440
 
     def resize_and_pad(self, img, size):
         h, w = img.shape
@@ -29,12 +28,14 @@ class BoardProcessor:
         return square
 
     def get_chars_from_roi(self, roi):
+        if roi.size == 0:
+            return []
+            
         thresh = cv2.adaptiveThreshold(
             roi, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY_INV, 11, 2
         )
-        # Remove small noise with open, then close small gaps
         kernel = np.ones((2, 2), np.uint8)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
@@ -43,25 +44,32 @@ class BoardProcessor:
         char_boxes = []
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
-            if 28 < h < 100 and 2 < w < 80:
+            if 25 < h < 110 and 2 < w < 90:
                 char_boxes.append((x, y, w, h))
 
         char_boxes.sort(key=lambda b: b[0])
-        chars = []
-        for x, y, w, h in char_boxes:
+        
+        output_list = []
+        for i in range(len(char_boxes)):
+            x, y, w, h = char_boxes[i]
+            
+            #find spaces
+            if i > 0:
+                prev_x, prev_y, prev_w, prev_h = char_boxes[i-1]
+                gap = x - (prev_x + prev_w)
+                if gap > (h * 0.45):
+                    output_list.append("SPACE")
+
             img = self.resize_and_pad(thresh[y:y + h, x:x + w], self.char_size)
             if img is not None:
-                chars.append(img)
-        return chars
+                output_list.append(img)
+        return output_list
 
     def segment_both(self, gray_img):
-        """
-        takes in image, returns 2 strings for the clue type and value
-        """
-        type_chars = self.get_chars_from_roi(
+        type_data = self.get_chars_from_roi(
             gray_img[self.top_y1:self.top_y2, self.top_x1:self.top_x2]
         )
-        val_chars = self.get_chars_from_roi(
+        val_data = self.get_chars_from_roi(
             gray_img[self.bot_y1:self.bot_y2, self.bot_x1:self.bot_x2]
         )
-        return type_chars, val_chars
+        return type_data, val_data
