@@ -14,6 +14,10 @@ class linefollowing:
     def __init__(self):
        self.bridge = CvBridge()
 
+       self.lost_line_counter = 0
+       self.finish_triggered = False
+       self.MAX_LOST_FRAMES = 10
+
        #Set-up publisher subscriber relationship
        self.pub_cmd = rospy.Publisher('/B1/cmd_vel', Twist, queue_size=1)
        self.pub_score = rospy.Publisher('/score_tracker',String,queue_size=1)
@@ -24,6 +28,9 @@ class linefollowing:
        self.pub_score.publish("rover,123,0,aaaaaa")
 
     def callback(self,data):
+       if self.finish_triggered:
+            return
+       
        cmd = Twist()
        p=150
 
@@ -62,25 +69,44 @@ class linefollowing:
        contours, hierarchy = cv2.findContours(FOV, cv2.RETR_TREE,
                                                cv2.CHAIN_APPROX_SIMPLE)
        if len(contours) == 0:
+            self.lost_line_counter += 1
+
+            if self.lost_line_counter > self.MAX_LOST_FRAMES:
+              if self.finish_triggered != True:
+                cmd.linear.x = 0
+                cmd.angular.z = 0
+                self.pub_cmd.publish(cmd)
+                self.finish_triggered = True
+                self.pub_score.publish("rover,123,-1,aaaaaa")
+                return
+              return
+
             cmd.linear.x = 0
             cmd.angular.z = .5
-            try:
-              self.pub_cmd.publish(cmd)
-            except CvBridgeError as e:
-              print(e)
+            self.pub_cmd.publish(cmd)
             return
                 
        else:
+            self.lost_line_counter = 0
             largest = max(contours, key=cv2.contourArea)
             moment = cv2.moments(largest)
             
        if moment["m00"]==0:
+            self.lost_line_counter += 1
+
+            if self.lost_line_counter > self.MAX_LOST_FRAMES:
+              if self.finish_triggered != True:
+                cmd.linear.x = 0
+                cmd.angular.z = 0
+                self.pub_cmd.publish(cmd)
+                self.finish_triggered = True
+                self.pub_score.publish("rover,123,-1,aaaaaa")
+                return
+              return
+
             cmd.linear.x = 0
             cmd.angular.z = .5
-            try:
-              self.pub_cmd.publish(cmd)
-            except CvBridgeError as e:
-              print(e)
+            self.pub_cmd.publish(cmd)
             return
        else:
             centriod_x = int(moment["m10"] / moment["m00"])
