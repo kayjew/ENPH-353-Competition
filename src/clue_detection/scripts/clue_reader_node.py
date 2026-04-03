@@ -9,18 +9,37 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import String
 import tensorflow as tf
 
-SHOW_DEBUG_VIEW = False
-
-# Import local utils
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-from clue_detection.model_utils import BoardProcessor, int_to_char
-
+SHOW_DEBUG_VIEW = True
 MODEL_PATH      = '/home/fizzer/ENPH-353-Competition/src/clue_detection/models/clue_reader_local.h5'
 TEAM_ID         = 'TeamName'
 PASSWORD        = 'password'
 CAMERA_TOPIC    = 'B1/rrbot/camera1/image_raw'
-PROCESS_EVERY_N = 3
+PROCESS_EVERY_N = 1
 CONFIRM_COUNT   = 3 
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+from clue_detection.model_utils import BoardProcessor, int_to_char
+
+def get_stable_string(raw_str):
+    #Transforms problem strings
+    if not raw_str:
+        return ""
+
+    mapping = {
+        '1': 'I', '0': 'O', '5': 'S', '7': 'T', 
+        '4': 'A', '3': 'E', '8': 'B', '9': 'M'
+    }
+    
+    normalized = "".join([mapping.get(c, c) for c in raw_str.upper()])
+    
+    keywords = [
+        "MOTIVE", "VICTIM", "SIZE", "PLACE", "CRIME", "TIME", "WEAPON", "BANDIT"]
+    
+    for word in keywords:
+        if word in normalized:
+            return word
+            
+    return "".join([c for c in normalized if c.isalnum()])
 
 class ClueReaderNode:
     def __init__(self):
@@ -30,19 +49,28 @@ class ClueReaderNode:
         self.process_every_n = PROCESS_EVERY_N
         self.frame_count     = 0
 
-        self.last_raw_result    = None
+        self.last_val           = None
+        self.last_type_id       = None
         self.consecutive_count  = 0
         self.published_clue_ids = set()
 
         self.model = tf.keras.models.load_model(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
-        if not self.model: rospy.logerr("Model not found!")
+        if not self.model: 
+            rospy.logerr("Model not found!")
 
         self.bridge    = CvBridge()
         self.processor = BoardProcessor()
         self.score_pub = rospy.Publisher('/score_tracker', String, queue_size=10)
 
         rospy.Subscriber(CAMERA_TOPIC, Image, self.image_callback, queue_size=1, buff_size=2**24)
-        rospy.loginfo("[ClueReader] Debugging enabled. Look for 'Debug View' window.")
+        rospy.loginfo("[ClueReader] Clue finding active")
+
+    def clue_num(self, clue_type_str):
+        clues = ['SIZE', 'VICTIM', 'CRIME', 'TIME', 'PLACE', 'MOTIVE', 'WEAPON', 'BANDIT']
+        for i, c in enumerate(clues):
+            if c in clue_type_str.upper():
+                return i + 1
+        return None
 
     def image_callback(self, msg):
         self.frame_count += 1
@@ -56,40 +84,43 @@ class ClueReaderNode:
 
         if not result:
             self.consecutive_count = 0
-            self.last_raw_result = None
             return
 
-        clue_type, clue_val = result
-        current_id = self.clue_num(clue_type)
-        combined = f"{clue_type}:{clue_val}"
+        raw_type, raw_val = result
+        
+        current_type_str = get_stable_string(raw_type)
+        current_val      = get_stable_string(raw_val)
+        current_id       = self.clue_num(current_type_str)
 
-        if combined == self.last_raw_result:
+        if current_id and current_val and current_id == self.last_type_id and current_val == self.last_val:
             self.consecutive_count += 1
         else:
             self.consecutive_count = 1
-            self.last_raw_result = combined
+            self.last_type_id = current_id
+            self.last_val = current_val
 
-        if self.consecutive_count >= CONFIRM_COUNT:
-            if current_id and current_id not in self.published_clue_ids:
-                self.publish_clue(clue_type, clue_val)
+        if self.consecutive_count == CONFIRM_COUNT:
+            if current_id not in self.published_clue_ids:
+                self.publish_clue(current_id, current_val)
                 self.published_clue_ids.add(current_id)
+                rospy.loginfo(f"STABLE MATCH: ID {current_id} ({current_type_str}) -> {current_val}")
+                
+                # Reset after publishing
                 self.consecutive_count = 0 
-                self.last_raw_result = None
+                self.last_val = None
+                self.last_type_id = None
 
     def process_frame(self, bgr_image):
         board_crop = self.detect_billboard(bgr_image)
         
-        #debug
         if board_crop is None:
             if SHOW_DEBUG_VIEW:
                 display_img = cv2.resize(bgr_image, (500, 300))
-                cv2.putText(display_img, "NO BOARD DETECTED", (50, 150), 
-                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                cv2.putText(display_img, "NO BOARD", (50, 150), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
                 cv2.imshow("Debug View", display_img)
                 cv2.waitKey(1)
             return None
 
-        # Standardize for OCR
         board_crop = cv2.resize(board_crop, (500, 300), interpolation=cv2.INTER_CUBIC)
 
         if SHOW_DEBUG_VIEW:
@@ -108,15 +139,13 @@ class ClueReaderNode:
             c_type = self.classify_sequence(type_list)
             c_val  = self.classify_sequence(val_list)
             if c_type:
-                rospy.loginfo(f"[Live] Type: {c_type} | Val: {c_val}")
-        except: return None
-
-        if c_type and c_val:
-            return c_type, c_val.strip()
-        return None
+                rospy.loginfo(f"[Live OCR] Raw Type: {c_type} | Raw Val: {c_val}")
+            return c_type, c_val
+        except: 
+            return None
 
     def classify_sequence(self, char_list):
-        if not char_list: return None
+        if not char_list: return ""
         res = ""
         for item in char_list:
             if isinstance(item, str) and item == "SPACE":
@@ -125,7 +154,10 @@ class ClueReaderNode:
                 inp = item.reshape(1, 32, 32, 1) / 255.0
                 pred = self.model.predict(inp, verbose=0)
                 res += int_to_char[np.argmax(pred)]
-        return res
+        
+        words = res.split()
+        filtered_words = [w for w in words if len(w) > 1 or w.upper() in ["A", "I"]]
+        return " ".join(filtered_words) if filtered_words else ""
 
     def detect_billboard(self, bgr_image):
         img_h, img_w = bgr_image.shape[:2]
@@ -138,38 +170,38 @@ class ClueReaderNode:
         valid_boards = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 200: continue
-            
+            if area < 6000: continue
             x, y, w, h = cv2.boundingRect(cnt)
-            
-            #ignore bottom of screen
-            if y < (img_h * 0.35):
-                continue
-                
+            if y < (img_h * 0.35): continue
             aspect_ratio = w / float(h)
-            if aspect_ratio < 0.5 or aspect_ratio > 3.5:
-                continue
-                
+            if aspect_ratio < 0.5 or aspect_ratio > 3.5: continue
             valid_boards.append(cnt)
 
         if not valid_boards: return None
-
-        #pick board in bottom of screen
-        best = max(valid_boards, key=lambda c: cv2.boundingRect(c)[1])
+        valid_boards.sort(key=cv2.contourArea, reverse=True)
+        
+        if len(valid_boards) > 1:
+            area1 = cv2.contourArea(valid_boards[0])
+            area2 = cv2.contourArea(valid_boards[1])
+            if abs(area1 - area2) / area1 < 0.15:
+                best = max(valid_boards[:2], key=lambda c: cv2.boundingRect(c)[1])
+            else:
+                best = valid_boards[0]
+        else:
+            best = valid_boards[0]
 
         x, y, w, h = cv2.boundingRect(best)
-        v_pad, h_pad = int(h * 0.02), int(w * 0.02)
         
         peri = cv2.arcLength(best, True)
         approx = cv2.approxPolyDP(best, 0.02 * peri, True)
-        
         if len(approx) == 4:
             src = self._order_points(np.float32([pt[0] for pt in approx]))
             dst = np.float32([[0,0], [w,0], [w,h], [0,h]])
             H, _ = cv2.findHomography(src, dst)
-            if H is None: return None
-            warp = cv2.warpPerspective(bgr_image, H, (w, h))
-            return warp[v_pad:h-v_pad, h_pad:w-h_pad]
+            if H is not None:
+                warp = cv2.warpPerspective(bgr_image, H, (w, h))
+                v_pad, h_pad = int(h * 0.02), int(w * 0.02)
+                return warp[v_pad:h-v_pad, h_pad:w-h_pad]
         
         return bgr_image[y:y+h, x:x+w]
 
@@ -180,22 +212,10 @@ class ClueReaderNode:
         rect[1], rect[3] = pts[np.argmin(d)], pts[np.argmax(d)]
         return rect
 
-    def clue_num(self, clue_type):
-        clues = ['SIZE', 'VICTIM', 'CRIME', 'TIME',
-        'PLACE', 'MOTIVE', 'WEAPON', 'BANDIT']
-        normalised = clue_type.upper().strip()
-        for i, c in enumerate(clues):
-            if c in normalised:
-                return i + 1
-        rospy.logwarn(f"[ClueReader] clue_num: no match for '{clue_type}' (normalised: '{normalised}')")
-        return None
-
-    def publish_clue(self, clue_type, prediction):
-        loc = self.clue_num(clue_type)
-        if loc:
-            msg = f"{self.team_id},{self.password},{loc},{prediction}"
-            self.score_pub.publish(String(data=msg))
-            rospy.loginfo(f"PUBLISHED: {msg}")
+    def publish_clue(self, loc, prediction):
+        msg = f"{self.team_id},{self.password},{loc},{prediction}"
+        self.score_pub.publish(String(data=msg))
+        rospy.loginfo(f"PUBLISHED: {msg}")
 
     def run(self): rospy.spin()
 
