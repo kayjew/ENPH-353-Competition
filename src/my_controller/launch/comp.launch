@@ -1,0 +1,25 @@
+<launch>
+  <!-- 
+    Launch file for the ENPH 353 Competition.
+    Package: my_controller
+  -->
+  
+  <!-- Vision Node: Processes camera for road centering and red line detection -->
+  <node pkg="my_controller" 
+        type="vision_pid.py" 
+        name="vision_pid" 
+        output="screen" />
+
+  <!-- PID Node: Calculates steering based on vision error -->
+  <node pkg="my_controller" 
+        type="linefollow_pid.py" 
+        name="linefollow_pid" 
+        output="screen" />
+
+  <!-- Brain Node: Manages states and macro-logic (Timer, Crosswalks, etc.) -->
+  <node pkg="my_controller" 
+        type="statemachine.py" 
+        name="statemachine" 
+        output="screen" />
+  
+</launch>

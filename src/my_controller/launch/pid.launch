@@ -2,7 +2,7 @@
    <!-- My Package launch file -->
    
    <node pkg="my_controller"
-         type="timetrials_move.py"
+         type="test_pid.py"
          name="move_robot" 
          output="screen">
    </node>

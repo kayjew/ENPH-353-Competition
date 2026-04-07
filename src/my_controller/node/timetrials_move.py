@@ -14,6 +14,10 @@ class linefollowing:
     def __init__(self):
        self.bridge = CvBridge()
 
+       self.lost_line_counter = 0
+       self.finish_triggered = False
+       self.MAX_LOST_FRAMES = 10
+
        #Set-up publisher subscriber relationship
        self.pub_cmd = rospy.Publisher('/B1/cmd_vel', Twist, queue_size=1)
        self.pub_score = rospy.Publisher('/score_tracker',String,queue_size=1)
@@ -24,6 +28,9 @@ class linefollowing:
        self.pub_score.publish("rover,123,0,aaaaaa")
 
     def callback(self,data):
+       if self.finish_triggered:
+            return
+       
        cmd = Twist()
        p=150
 
@@ -37,50 +44,60 @@ class linefollowing:
    
        #Threshold image and define FOV
        blurred = cv2.medianBlur(cv_image, 5)
-       gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
-       thresh = 95
-       _, img_bin = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY_INV)
+       hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+       lower_thresh = np.array([0, 0, 0])    # H, S, V
+       upper_thresh= np.array([150, 50, 255]) # Low saturation limit is key here
+       img_bin = cv2.inRange(hsv, lower_thresh, upper_thresh)
        
-       # 3. Create a kernel (the size of the 'eraser' or 'patch')
-       kernel = np.ones((5,5), np.uint8)
-
-       # 4. REMOVE DOTS: Opening
-       img_no_dots = cv2.morphologyEx(img_bin, cv2.MORPH_OPEN, kernel)
-
-       # 5. FILL SEAMS: Closing
-       img_final = cv2.morphologyEx(img_no_dots, cv2.MORPH_CLOSE, kernel)
-       
-       
-       FOV = img_final[int(0.9*height):height, :]
+       FOV = img_bin[int(0.9*height):height, :]
        
        #debug
        cv2.imshow("Original Camera", cv_image)
-       cv2.imshow("Thresholded Image", img_final)
+       cv2.imshow("Thresholded Image", img_bin)
        cv2.waitKey(1)
 
        #Find max contours
        contours, hierarchy = cv2.findContours(FOV, cv2.RETR_TREE,
                                                cv2.CHAIN_APPROX_SIMPLE)
        if len(contours) == 0:
+            self.lost_line_counter += 1
+
+            if self.lost_line_counter > self.MAX_LOST_FRAMES:
+              if self.finish_triggered != True:
+                cmd.linear.x = 0
+                cmd.angular.z = 0
+                self.pub_cmd.publish(cmd)
+                self.finish_triggered = True
+                self.pub_score.publish("rover,123,-1,aaaaaa")
+                return
+              return
+
             cmd.linear.x = 0
             cmd.angular.z = .5
-            try:
-              self.pub_cmd.publish(cmd)
-            except CvBridgeError as e:
-              print(e)
+            self.pub_cmd.publish(cmd)
             return
                 
        else:
+            self.lost_line_counter = 0
             largest = max(contours, key=cv2.contourArea)
             moment = cv2.moments(largest)
             
        if moment["m00"]==0:
+            self.lost_line_counter += 1
+
+            if self.lost_line_counter > self.MAX_LOST_FRAMES:
+              if self.finish_triggered != True:
+                cmd.linear.x = 0
+                cmd.angular.z = 0
+                self.pub_cmd.publish(cmd)
+                self.finish_triggered = True
+                self.pub_score.publish("rover,123,-1,aaaaaa")
+                return
+              return
+
             cmd.linear.x = 0
             cmd.angular.z = .5
-            try:
-              self.pub_cmd.publish(cmd)
-            except CvBridgeError as e:
-              print(e)
+            self.pub_cmd.publish(cmd)
             return
        else:
             centriod_x = int(moment["m10"] / moment["m00"])
