@@ -20,27 +20,6 @@ CONFIRM_COUNT   = 3
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
 from clue_detection.model_utils import BoardProcessor, int_to_char
 
-def get_stable_string(raw_str):
-    #Transforms problem strings
-    if not raw_str:
-        return ""
-
-    mapping = {
-        '1': 'I', '0': 'O', '5': 'S', '7': 'T', 
-        '4': 'A', '3': 'E', '8': 'B', '9': 'M'
-    }
-    
-    normalized = "".join([mapping.get(c, c) for c in raw_str.upper()])
-    
-    keywords = [
-        "MOTIVE", "VICTIM", "SIZE", "PLACE", "CRIME", "TIME", "WEAPON", "BANDIT"]
-    
-    for word in keywords:
-        if word in normalized:
-            return word
-            
-    return "".join([c for c in normalized if c.isalnum()])
-
 class ClueReaderNode:
     def __init__(self):
         rospy.init_node('clue_reader_node', anonymous=True)
@@ -66,8 +45,11 @@ class ClueReaderNode:
             "SIZE": 1,
             "VICTIM": 2,
             "CRIME": 3,
-            "PLACE": 4,
-            "NAME": 5
+            "TIME": 4,
+            "PLACE": 5,
+            "MOTIVE": 6,
+            "WEAPON": 7,
+            "BANDIT": 8,
         }
 
         self.model = tf.keras.models.load_model(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
@@ -89,8 +71,8 @@ class ClueReaderNode:
         # Define keywords
         mapping = {
             "SIZE": ["SIZE", "S1ZE", "5IZE"],
-            "VICTIM": ["VIC", "V1C", "TIM", "V1CT"],
-            "CRIME": ["CRIM", "CRME", "CR1M", "RIME"],
+            "VICTIM": ["VIC", "V1C", "TIM", "V1CT", "VIT"],
+            "CRIME": ["CRIM", "CRME", "CR1M", "RIME", "IHE", "1HE"],
             "PLACE": ["PLAC", "PLCE", "LACE"],
         }
         
@@ -214,7 +196,7 @@ class ClueReaderNode:
         valid_boards = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 2000: continue
+            if area < 3000: continue
             x, y, w, h = cv2.boundingRect(cnt)
             if y < (img_h * 0.35): continue
             aspect_ratio = w / float(h)

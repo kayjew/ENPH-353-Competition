@@ -159,11 +159,14 @@ class BrainNode:
                 else:
                    if self.active_mode == "PID":
                         if self.clue_active:
-                            out_twist.linear.x = 0.05
+                            if self.clue_offset > 0:
+                                out_twist.linear.x = 0.1
+                            else:
+                                out_twist.linear.x = 0.01
                             self.was_peeking = True
                             
                             if abs(self.clue_offset) > 0.4:
-                                out_twist.angular.z = self.clue_offset * -1.3 
+                                out_twist.angular.z = self.clue_offset * -1.2 
                             else:
                                 out_twist.angular.z = (self.pid_twist.angular.z * 0.2) + (self.clue_offset * -1)
                                 
