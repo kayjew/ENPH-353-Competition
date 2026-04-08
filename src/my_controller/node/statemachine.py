@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import rospy
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Float32
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 
@@ -33,6 +33,10 @@ class BrainNode:
         self.ped_red_detected = False
         self.pedestrian_in_way = False
         self.lidar_error = 0.0
+        self.clue_active = False
+        self.clue_offset = 0.0
+        self.nudge_factor = 0.6
+        self.was_peeking = False
         
         # lost frame tracking
         self.lost_frame_counter = 0
@@ -51,6 +55,8 @@ class BrainNode:
         rospy.Subscriber("/vision/ped_red", Bool, self.ped_red_callback)
         rospy.Subscriber("/control/pid_vel", Twist, self.pid_callback)
         rospy.Subscriber("/scan", LaserScan, self.lidar_callback)
+        rospy.Subscriber("/clue/horizontal_offset", Float32, self.offset_callback)
+        rospy.Subscriber("/clue/active_processing", Bool, self.clue_callback)
         # rospy.Subscriber("/control/il_vel", Twist, self.il_callback) 
         
         rospy.loginfo(f"Brain Node Initialized. Starting control loop in Mode: {self.active_mode}")
@@ -63,6 +69,12 @@ class BrainNode:
 
     def ped_red_callback(self, msg):
         self.ped_red_detected = msg.data
+
+    def clue_callback(self, msg):
+        self.clue_active = msg.data
+
+    def offset_callback(self, msg):
+        self.clue_offset = msg.data
     
     def lidar_callback(self, msg):
         front_cone = list(msg.ranges[-20:]) + list(msg.ranges[:20])
@@ -145,9 +157,28 @@ class BrainNode:
                     self.action_state = ActionState.RECOVERY
                     rospy.logwarn("Road lost! State: RECOVERY")
                 else:
-                    if self.active_mode == "PID":
-                        out_twist.linear.x = self.pid_twist.linear.x
-                        out_twist.angular.z = self.pid_twist.angular.z
+                   if self.active_mode == "PID":
+                        if self.clue_active:
+                            out_twist.linear.x = 0.05
+                            self.was_peeking = True
+                            
+                            if abs(self.clue_offset) > 0.4:
+                                out_twist.angular.z = self.clue_offset * -1.3 
+                            else:
+                                out_twist.angular.z = (self.pid_twist.angular.z * 0.2) + (self.clue_offset * -1)
+                                
+                            rospy.loginfo_throttle(0.2, f"HEAVY PEEK: {self.clue_offset:.2f}")
+                        
+                        elif getattr(self, 'was_peeking', False):
+                            out_twist.linear.x = 0.12 
+                            out_twist.angular.z = self.pid_twist.angular.z * 1.6
+                            if abs(self.pid_twist.angular.z) < 0.15:
+                                rospy.loginfo("Alignment clear. Resuming full speed.")
+                                self.was_peeking = False
+                        
+                        else:
+                            out_twist.linear.x = self.pid_twist.linear.x
+                            out_twist.angular.z = self.pid_twist.angular.z
                     #elif self.active_mode == "IL":
                     #    out_twist = self.il_twist
 

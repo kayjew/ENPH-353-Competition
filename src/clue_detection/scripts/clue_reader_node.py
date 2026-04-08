@@ -6,8 +6,8 @@ import cv2
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image
-from std_msgs.msg import String
 import tensorflow as tf
+from std_msgs.msg import Bool, String, Float32
 
 SHOW_DEBUG_VIEW = True
 MODEL_PATH      = '/home/fizzer/ENPH-353-Competition/src/clue_detection/models/clue_reader_local.h5'
@@ -44,15 +44,31 @@ def get_stable_string(raw_str):
 class ClueReaderNode:
     def __init__(self):
         rospy.init_node('clue_reader_node', anonymous=True)
+        self.offset_pub = rospy.Publisher("/clue/horizontal_offset", Float32, queue_size=1)
+
         self.team_id         = TEAM_ID
         self.password        = PASSWORD
         self.process_every_n = PROCESS_EVERY_N
         self.frame_count     = 0
+        self.last_board_x = 250
 
         self.last_val           = None
         self.last_type_id       = None
         self.consecutive_count  = 0
         self.published_clue_ids = set()
+
+        self.last_match_key = ""
+        self.consecutive_count = 0
+        self.published_ids = set() # To keep track of which boards we've already scored
+        
+        # Map the fuzzy ID to the competition board number (example mapping)
+        self.id_map = {
+            "SIZE": 1,
+            "VICTIM": 2,
+            "CRIME": 3,
+            "PLACE": 4,
+            "NAME": 5
+        }
 
         self.model = tf.keras.models.load_model(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
         if not self.model: 
@@ -62,9 +78,27 @@ class ClueReaderNode:
         self.processor = BoardProcessor()
         self.score_pub = rospy.Publisher('/score_tracker', String, queue_size=10)
 
+        self.processing_pub = rospy.Publisher("/clue/active_processing", Bool, queue_size=1)
+
         rospy.Subscriber(CAMERA_TOPIC, Image, self.image_callback, queue_size=1, buff_size=2**24)
         rospy.loginfo("[ClueReader] Clue finding active")
 
+    def get_fuzzy_id(self, raw_id):
+        raw_id = raw_id.upper()
+        
+        # Define keywords
+        mapping = {
+            "SIZE": ["SIZE", "S1ZE", "5IZE"],
+            "VICTIM": ["VIC", "V1C", "TIM", "V1CT"],
+            "CRIME": ["CRIM", "CRME", "CR1M", "RIME"],
+            "PLACE": ["PLAC", "PLCE", "LACE"],
+        }
+        
+        for official_name, triggers in mapping.items():
+            if any(t in raw_id for t in triggers):
+                return official_name
+        return None # No clear match
+    
     def clue_num(self, clue_type_str):
         clues = ['SIZE', 'VICTIM', 'CRIME', 'TIME', 'PLACE', 'MOTIVE', 'WEAPON', 'BANDIT']
         for i, c in enumerate(clues):
@@ -82,33 +116,43 @@ class ClueReaderNode:
 
         result = self.process_frame(cv_img)
 
-        if not result:
+        if result is None:
+            self.processing_pub.publish(False)
             self.consecutive_count = 0
             return
 
         raw_type, raw_val = result
-        
-        current_type_str = get_stable_string(raw_type)
-        current_val      = get_stable_string(raw_val)
-        current_id       = self.clue_num(current_type_str)
+        fuzzy_type = self.get_fuzzy_id(raw_type)
+        board_num = self.id_map.get(fuzzy_type, 0)
 
-        if current_id and current_val and current_id == self.last_type_id and current_val == self.last_val:
-            self.consecutive_count += 1
-        else:
-            self.consecutive_count = 1
-            self.last_type_id = current_id
-            self.last_val = current_val
+        if board_num in self.published_ids:
+            self.processing_pub.publish(False) 
+            return 
 
-        if self.consecutive_count == CONFIRM_COUNT:
-            if current_id not in self.published_clue_ids:
-                self.publish_clue(current_id, current_val)
-                self.published_clue_ids.add(current_id)
-                rospy.loginfo(f"STABLE MATCH: ID {current_id} ({current_type_str}) -> {current_val}")
+        self.processing_pub.publish(True)
+        img_w = cv_img.shape[1]
+        normalized_offset = (self.last_board_x - (img_w / 2)) / (img_w / 2)
+        self.offset_pub.publish(normalized_offset)
+
+        clean_val = raw_val.replace(" ", "").strip()
+        if fuzzy_type and clean_val:
+            match_key = f"{fuzzy_type}:{clean_val}"
+            
+            if match_key == self.last_match_key:
+                self.consecutive_count += 1
+            else:
+                self.consecutive_count = 1
+                self.last_match_key = match_key
+
+            if self.consecutive_count >= 3:
+                submission = f"TeamName,password,{board_num},{clean_val}"
+                self.score_pub.publish(submission)
+                self.published_ids.add(board_num)
+                rospy.loginfo(f"PUBLISHED: {submission}")
                 
-                # Reset after publishing
                 self.consecutive_count = 0 
-                self.last_val = None
-                self.last_type_id = None
+                self.last_match_key = ""
+                self.processing_pub.publish(False)
 
     def process_frame(self, bgr_image):
         board_crop = self.detect_billboard(bgr_image)
@@ -170,7 +214,7 @@ class ClueReaderNode:
         valid_boards = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 6000: continue
+            if area < 2000: continue
             x, y, w, h = cv2.boundingRect(cnt)
             if y < (img_h * 0.35): continue
             aspect_ratio = w / float(h)
@@ -191,6 +235,7 @@ class ClueReaderNode:
             best = valid_boards[0]
 
         x, y, w, h = cv2.boundingRect(best)
+        self.last_board_x = x + (w/2)
         
         peri = cv2.arcLength(best, True)
         approx = cv2.approxPolyDP(best, 0.02 * peri, True)
@@ -215,6 +260,7 @@ class ClueReaderNode:
     def publish_clue(self, loc, prediction):
         msg = f"{self.team_id},{self.password},{loc},{prediction}"
         self.score_pub.publish(String(data=msg))
+        self.processing_pub.publish(False)
         rospy.loginfo(f"PUBLISHED: {msg}")
 
     def run(self): rospy.spin()
