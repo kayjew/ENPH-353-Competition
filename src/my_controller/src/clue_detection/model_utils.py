@@ -18,10 +18,12 @@ class BoardProcessor:
         h, w = img.shape
         if h < 2 or w < 2:
             return None
+        #Rescale char to fit
         scale = (size - 6) / max(h, w)
         new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
         resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
         square = np.zeros((size, size), dtype=np.uint8)
+        #Prepare char for network
         offset_y = (size - new_h) // 2
         offset_x = (size - new_w) // 2
         square[offset_y:offset_y + new_h, offset_x:offset_x + new_w] = resized
@@ -30,23 +32,25 @@ class BoardProcessor:
     def get_chars_from_roi(self, roi):
         if roi.size == 0:
             return []
-            
+        #Convert to binary
         thresh = cv2.adaptiveThreshold(
             roi, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY_INV, 11, 2
         )
+        #Remove noise
         kernel = np.ones((2, 2), np.uint8)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, kernel)
         thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
+        #Convert to contours
         contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         char_boxes = []
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
             if 25 < h < 110 and 2 < w < 90:
                 char_boxes.append((x, y, w, h))
-
+        #Organize by x value to preserve string order
         char_boxes.sort(key=lambda b: b[0])
         
         output_list = []
@@ -60,15 +64,18 @@ class BoardProcessor:
                 if gap > (h * 0.45):
                     output_list.append("SPACE")
 
+            #Extract char, get ready for model
             img = self.resize_and_pad(thresh[y:y + h, x:x + w], self.char_size)
             if img is not None:
                 output_list.append(img)
         return output_list
 
     def segment_both(self, gray_img):
+        #Parse clue type
         type_data = self.get_chars_from_roi(
             gray_img[self.top_y1:self.top_y2, self.top_x1:self.top_x2]
         )
+        #Parse clue value
         val_data = self.get_chars_from_roi(
             gray_img[self.bot_y1:self.bot_y2, self.bot_x1:self.bot_x2]
         )

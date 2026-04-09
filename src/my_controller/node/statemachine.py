@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import rospy
-from std_msgs.msg import Bool, String
+from std_msgs.msg import Bool, String, Float32
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 
@@ -39,14 +39,27 @@ class BrainNode:
         self.dash_start_time = 0.0
         self.exited_roundabout = False
         self.teleport_line_detected = False
+
+        #Peek values
+        self.clue_active = False
+        self.clue_offset = 0.0
+        self.nudge_factor = 0.6
+        self.was_peeking = False
+        self.clue_reader_ready = False
+        self.debug = False
+
+        # Peek unwind state
+        self.peek_unwind_direction = 0.0
+        self.peek_unwind_strength = 0.0    
+        self.stable_frame_count = 0        
+        self.STABLE_FRAMES_NEEDED = 8      
         
         # lost frame tracking
         self.lost_frame_counter = 0
-        self.MAX_LOST_FRAMES = 150  # 30Hz,150 frames, 5 sec
+        self.MAX_LOST_FRAMES = 150  # 30Hz, 150 frames, 5 sec
         
         #start course by pid
         self.pid_twist = Twist()
-        #self.il_twist = Twist()
         self.active_mode = "PID" 
         
         # subscribe/publish
@@ -60,6 +73,9 @@ class BrainNode:
         rospy.Subscriber("/vision/wide_road", Bool, self.wide_callback)
         rospy.Subscriber("/vision/pink_line", Bool, self.teleport_callback)
         # rospy.Subscriber("/control/il_vel", Twist, self.il_callback) 
+        rospy.Subscriber("/clue/horizontal_offset", Float32, self.offset_callback)
+        rospy.Subscriber("/clue/active_processing", Bool, self.clue_callback)
+        rospy.Subscriber("/clue/status", String, self.clue_status_callback)
         
         rospy.loginfo(f"Brain Node Initialized. Starting control loop in Mode: {self.active_mode}")
 
@@ -71,6 +87,25 @@ class BrainNode:
 
     def ped_red_callback(self, msg):
         self.ped_red_detected = msg.data
+
+    def clue_status_callback(self, msg):
+        if msg.data == "READY":
+            self.clue_reader_ready = True
+
+    def clue_callback(self, msg):
+        prev = self.clue_active
+        self.clue_active = msg.data
+
+        #Storing info about peeking to return
+        if prev and not self.clue_active and not self.was_peeking:
+            self.peek_unwind_direction = 1.0 if self.clue_offset > 0 else -1.0
+            self.peek_unwind_strength  = min(abs(self.clue_offset), 1.0)
+            self.stable_frame_count    = 0
+            if self.debug:    
+                rospy.loginfo(f"Store unpeek dir={self.peek_unwind_direction:.1f} strength={self.peek_unwind_strength:.2f}")
+
+    def offset_callback(self, msg):
+        self.clue_offset = msg.data
     
     def lidar_callback(self, msg):
         valid_ranges = [r for r in msg.ranges if 0.035 < r < .5]
@@ -81,10 +116,6 @@ class BrainNode:
     
     def teleport_callback(self, msg):
         self.teleport_line_detected = msg.data
-
-        
-    #def il_callback(self, msg):
-    #    self.il_twist = msg
 
     def run(self):
         rate = rospy.Rate(30)
@@ -103,7 +134,7 @@ class BrainNode:
                 self.action_state = ActionState.STOPPED
             
             
-            # MACRO,Where are we on the track?
+            # MACRO — Where are we on the track?
             if self.course_section == CourseSection.START_ZONE:
                 pass
                 
@@ -166,12 +197,11 @@ class BrainNode:
                             self.course_section = CourseSection.TELEPORT_2
 
             
-            # MICRO,What are the wheels doing?
+            # MICRO — What are the wheels doing?
             if self.action_state == ActionState.IDLE:
-                if self.road_visible and self.course_section == CourseSection.START_ZONE:
+                if self.road_visible and self.clue_reader_ready and self.course_section == CourseSection.START_ZONE:
                     self.action_state = ActionState.FOLLOWING_LINE
                     self.course_section = CourseSection.PEDESTRIAN_CROSSING
-                    #start timer
                     self.pub_score.publish("rover,123,0,aaaaaa")
                     rospy.loginfo("Road seen! State: FOLLOWING_LINE")
                 elif self.course_section == CourseSection.TELEPORT_1:
@@ -184,10 +214,44 @@ class BrainNode:
                     rospy.logwarn("Road lost! State: RECOVERY")
                 else:
                     if self.active_mode == "PID":
-                        out_twist.linear.x = self.pid_twist.linear.x
-                        out_twist.angular.z = self.pid_twist.angular.z
-                    #elif self.active_mode == "IL":
-                    #    out_twist = self.il_twist
+
+                        #peeking
+                        if self.clue_active:
+                            out_twist.linear.x = 0.02 if self.clue_offset > 0 else 0.03
+                            
+                            self.was_peeking = True
+                            
+                            #Store peeking info
+                            self.peek_unwind_direction = -1.0 if self.clue_offset > 0 else 1.0
+                            self.peek_unwind_strength = abs(self.clue_offset)
+
+                            #Steering toward board
+                            if abs(self.clue_offset) > 0.4:
+                                raw = self.clue_offset * -1.2
+                                out_twist.angular.z = max(-0.5, min(0.5, raw))
+                            else:
+                                out_twist.angular.z = (self.pid_twist.angular.z * 0.2) + (self.clue_offset * -1)
+                            if self.debug:    
+                                rospy.loginfo_throttle(0.2, f"Peek: {self.clue_offset:.2f}")
+                        
+                        # Undo peek
+                        elif self.was_peeking:
+                            unwind_angular = self.peek_unwind_direction * self.peek_unwind_strength * 1.2
+                            out_twist.linear.x  = 0.15  
+                            out_twist.angular.z = unwind_angular
+                            self.peek_unwind_strength *= 0.92
+
+                            #Prevent PID from going crazy
+                            if self.peek_unwind_strength < 0.05:
+                                if self.debug:
+                                    rospy.loginfo("Undo peek")
+                                self.was_peeking = False
+                                self.peek_unwind_strength = 0.0
+                            if self.debug:
+                                rospy.loginfo_throttle(0.1, f"[Unwind] dir={self.peek_unwind_direction:.1f} str={self.peek_unwind_strength:.3f}")
+                        else:
+                            out_twist.linear.x = self.pid_twist.linear.x
+                            out_twist.angular.z = self.pid_twist.angular.z
 
             elif self.action_state == ActionState.RECOVERY:
                 out_twist.angular.z = 0.5  
@@ -198,11 +262,9 @@ class BrainNode:
                     rospy.loginfo("Road found! State: FOLLOWING_LINE")
             
             elif self.action_state == ActionState.STOPPED:
-                # Fully cut the motors
                 out_twist.linear.x = 0.0
                 out_twist.angular.z = 0.0
 
-            # Publish the final decision to the actual robot wheels
             self.cmd_pub.publish(out_twist)
             rate.sleep()
 
