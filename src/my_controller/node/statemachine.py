@@ -31,8 +31,14 @@ class BrainNode:
         self.course_section = CourseSection.START_ZONE
         self.road_visible = False
         self.ped_red_detected = False
-        self.pedestrian_in_way = False
+        self.prev_lidar_reading = False
+        self.lidar_obstructed = False
+        self.road_wide = False
         self.lidar_error = 0.0
+        self.wide_frame_count = 0
+        self.dash_start_time = 0.0
+        self.exited_roundabout = False
+        self.teleport_line_detected = False
         
         # lost frame tracking
         self.lost_frame_counter = 0
@@ -51,6 +57,8 @@ class BrainNode:
         rospy.Subscriber("/vision/ped_red", Bool, self.ped_red_callback)
         rospy.Subscriber("/control/pid_vel", Twist, self.pid_callback)
         rospy.Subscriber("/scan", LaserScan, self.lidar_callback)
+        rospy.Subscriber("/vision/wide_road", Bool, self.wide_callback)
+        rospy.Subscriber("/vision/pink_line", Bool, self.teleport_callback)
         # rospy.Subscriber("/control/il_vel", Twist, self.il_callback) 
         
         rospy.loginfo(f"Brain Node Initialized. Starting control loop in Mode: {self.active_mode}")
@@ -65,25 +73,14 @@ class BrainNode:
         self.ped_red_detected = msg.data
     
     def lidar_callback(self, msg):
-        front_cone = list(msg.ranges[-20:]) + list(msg.ranges[:20])
-        valid_ranges = [r for r in front_cone if 0.1 < r < 10.0]
-        
-        # If any object is within 0.8m of the front, path is blocked
-        if valid_ranges and min(valid_ranges) < 0.8:
-            self.pedestrian_in_way = True
-        else:
-            self.pedestrian_in_way = False
+        valid_ranges = [r for r in msg.ranges if 0.035 < r < .5]
+        self.lidar_obstructed = len(valid_ranges) > 0
 
-        # 2. Widest Gap Strategy (For Roundabout navigation)
-        # Look at 180 degree arc in front (indices 180 to 540)
-        front_arc = msg.ranges[180:540]
-        if front_arc:
-            # Find the direction of the "deepest" opening
-            max_val = max(front_arc)
-            if max_val > 0:
-                max_idx = front_arc.index(max_val)
-                # Normalize to [-1.0 (left), 1.0 (right)]
-                self.lidar_error = (180 - max_idx) / 180.0
+    def wide_callback(self, msg):
+        self.road_wide = msg.data
+    
+    def teleport_callback(self, msg):
+        self.teleport_line_detected = msg.data
 
         
     #def il_callback(self, msg):
@@ -112,23 +109,61 @@ class BrainNode:
                 
             elif self.course_section == CourseSection.PEDESTRIAN_CROSSING:
                 if self.action_state == ActionState.FOLLOWING_LINE and self.ped_red_detected:
-                    rospy.loginfo("Red line detected! Stopping for crosswalk.")
+                    rospy.loginfo("Red line detected. Stopping.")
                     self.action_state = ActionState.STOPPED
-                    #self.dash_timer_start = 0.0 # Reset the dash timer
-                # Waiting Phase
+                    self.prev_lidar_reading = False
                 elif self.action_state == ActionState.STOPPED:
-                    if not self.pedestrian_in_way:
-                        rospy.loginfo("Path clear! DASHING across crosswalk.")
-                        self.action_state = ActionState.DASHING
-                        self.dash_timer_start = rospy.get_time()
-                
-                # Dash Phase (Cross the street regardless of vision for 2 seconds)
-                elif self.action_state == ActionState.DASHING:
-                    if (rospy.get_time() - self.dash_timer_start) > 2.0:
-                        rospy.loginfo("Crosswalk cleared. Entering ROUND_ABOUT.")
+                    if self.prev_lidar_reading == True and self.lidar_obstructed == False:
+                        rospy.loginfo("FALLING EDGE DETECTED: Pedestrian has passed.")
                         self.course_section = CourseSection.ROUND_ABOUT
                         self.action_state = ActionState.FOLLOWING_LINE
+                    self.prev_lidar_reading = self.lidar_obstructed
                 pass
+
+            elif self.course_section == CourseSection.ROUND_ABOUT:
+                if self.road_wide:
+                    self.wide_frame_count += 1
+                    rospy.loginfo(f"Wide road detected! Count is: {self.wide_frame_count}")
+                    if self.wide_frame_count > 15:
+                        rospy.loginfo("Road is wide. Entering Roundabout.")
+                        self.action_state = ActionState.STOPPED
+                        self.course_section = CourseSection.TELEPORT_1
+                        self.prev_lidar_reading = False
+                        self.wide_frame_count =0
+                else:
+                    self.wide_frame_count =0
+
+            elif self.course_section == CourseSection.TELEPORT_1:
+                if self.action_state == ActionState.STOPPED:
+                    if self.prev_lidar_reading == True and self.lidar_obstructed == False:
+                        rospy.loginfo("Gap in traffic! Starting left turn.")
+                        self.action_state=ActionState.IDLE
+                        self.dash_start_time = rospy.get_time()
+                    self.prev_lidar_reading = self.lidar_obstructed
+                elif self.action_state == ActionState.IDLE:
+                    if rospy.get_time() - self.dash_start_time > 1.5:
+                        rospy.loginfo("Turn complete. Resuming Line Follow.") 
+                        self.action_state = ActionState.FOLLOWING_LINE 
+                elif self.action_state == ActionState.FOLLOWING_LINE:
+                     if not self.exited_roundabout:
+                        if self.road_wide:
+                            self.wide_frame_count += 1
+                            rospy.loginfo(f"Wide road detected! Count is: {self.wide_frame_count}")
+                            if self.wide_frame_count > 10:
+                                rospy.loginfo("Road is wide. Exiting Roundabout.")
+                                self.exited_roundabout = True
+                                self.action_state = ActionState.IDLE
+                                self.dash_start_time = rospy.get_time()
+                                self.prev_lidar_reading = False
+                                self.wide_frame_count =0
+                        else:
+                            self.wide_frame_count =0
+                     else:
+                         # We are still line following perfectly, just checking a different sensor
+                        if self.teleport_line_detected:
+                            rospy.loginfo("Pink Line detected! Stopping and moving to TELEPORT_2.")
+                            self.action_state = ActionState.STOPPED
+                            self.course_section = CourseSection.TELEPORT_2
 
             
             # MICRO,What are the wheels doing?
@@ -139,6 +174,9 @@ class BrainNode:
                     #start timer
                     self.pub_score.publish("rover,123,0,aaaaaa")
                     rospy.loginfo("Road seen! State: FOLLOWING_LINE")
+                elif self.course_section == CourseSection.TELEPORT_1:
+                    out_twist.linear.x = 0.3
+                    out_twist.angular.z = 1.0
 
             elif self.action_state == ActionState.FOLLOWING_LINE:
                 if not self.road_visible:
@@ -159,10 +197,6 @@ class BrainNode:
                     self.action_state = ActionState.FOLLOWING_LINE
                     rospy.loginfo("Road found! State: FOLLOWING_LINE")
             
-            elif self.action_state == ActionState.DASHING:
-                out_twist.linear.x = 0.8 # Dash speed
-                out_twist.angular.z = 0.0
-
             elif self.action_state == ActionState.STOPPED:
                 # Fully cut the motors
                 out_twist.linear.x = 0.0

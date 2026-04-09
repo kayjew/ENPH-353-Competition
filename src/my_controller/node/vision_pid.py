@@ -14,7 +14,9 @@ class PIDVisionNode:
         # Publishers
         self.error_pub = rospy.Publisher("/vision/lane_error", Float32, queue_size=1)
         self.visible_pub = rospy.Publisher("/vision/road_visible", Bool, queue_size=1)
+        self.wide_road_pub = rospy.Publisher("/vision/wide_road", Bool, queue_size=1)
         self.ped_pub = rospy.Publisher("/vision/ped_red", Bool, queue_size=1)
+        self.tel_pub = rospy.Publisher("/vision/pink_line", Bool, queue_size=1)
         
         # Subscriber
         self.image_sub = rospy.Subscriber("/B1/rrbot/camera1/image_raw", Image, self.image_callback, queue_size=1)
@@ -51,6 +53,21 @@ class PIDVisionNode:
             
             self.ped_pub.publish(is_ped)
 
+            #threshold for teleport
+            lower_tel = np.array([150,80, 50]) 
+            upper_tel = np.array([180, 150, 150])
+            tel_mask = cv2.inRange(hsv, lower_tel, upper_tel)
+            
+            tel_contours, _ = cv2.findContours(tel_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            is_tel = False
+
+            if tel_contours:
+                largest_tel = max(tel_contours, key=cv2.contourArea)
+                if cv2.contourArea(largest_tel) > 500: # Ensure it's not just a noisy pixel
+                    is_tel = True
+            
+            self.tel_pub.publish(is_tel)
+
             #find contours
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
@@ -86,6 +103,9 @@ class PIDVisionNode:
             right_edge = road_indices[-1]
 
             midpoint = (left_edge + right_edge) / 2.0
+
+            is_wide = (left_edge <= 0) and (right_edge >= width-1) 
+            self.wide_road_pub.publish(is_wide)
             
             # The error is the distance from the camera center to this midpoint.
             raw_error = (width / 2.0) - midpoint
