@@ -229,7 +229,7 @@ class ClueReaderNode:
         #Skip boards that are too small, high, wrong shape
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 3000: continue
+            if area < 4500: continue
             x, y, w, h = cv2.boundingRect(cnt)
             if y < (img_h * 0.35): continue
             aspect_ratio = w / float(h)
