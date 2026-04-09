@@ -102,6 +102,8 @@ class ClueReaderNode:
 
     #Main image processing
     def image_callback(self, msg):
+        if (self.current_clue_index == 4):
+            self.PUBLISH_COOLDOWN = 10
         #Blind robot for 3s to get away from board after publishing
         if (rospy.get_time() - self.last_publish_time) < self.PUBLISH_COOLDOWN:
             self.processing_pub.publish(False)
@@ -229,7 +231,7 @@ class ClueReaderNode:
         #Skip boards that are too small, high, wrong shape
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < 4500: continue
+            if area < 3700: continue
             x, y, w, h = cv2.boundingRect(cnt)
             if y < (img_h * 0.35): continue
             aspect_ratio = w / float(h)

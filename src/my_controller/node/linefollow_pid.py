@@ -40,7 +40,7 @@ class LineFollowPIDNode:
         self.target_speed = 1
         
         #Introduce bias in pid
-        self.CLUE_BIASES = [-0.1, 0.1, 0.1 -0.25, 0.1, 0.1, -0.1, 0.1]
+        self.CLUE_BIASES = [-0.1, 0.1, 0.0, -0.15, 0.1, 0.1, -0.1, 0.1]
         self.current_bias = self.CLUE_BIASES[0] 
         
         # subscribers
