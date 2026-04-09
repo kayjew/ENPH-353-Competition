@@ -171,6 +171,7 @@ class ClueReaderNode:
         if vote_count >= CONFIRM_COUNT:
             submission = f"{self.team_id},{self.password},{board_num},{most_common_val}"
             self.score_pub.publish(submission)
+            self.processing_pub.publish(False)
             
             self.published_ids.add(board_num)
             self.last_publish_time = rospy.get_time() 
@@ -179,7 +180,6 @@ class ClueReaderNode:
 
             self.current_clue_index = board_num + 1
             self.vote_window = []
-            self.processing_pub.publish(False)
 
     def process_frame(self, bgr_image):
         board_crop = self.detect_billboard(bgr_image)
