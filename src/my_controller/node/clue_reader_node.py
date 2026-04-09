@@ -62,7 +62,7 @@ class ClueReaderNode:
         self.processor = BoardProcessor()
 
         # Subscribers
-        rospy.Subscriber(CAMERA_TOPIC, Image, self.kk, queue_size=1, buff_size=2**24)
+        rospy.Subscriber(CAMERA_TOPIC, Image, self.image_callback, queue_size=1, buff_size=2**24)
         self.status_pub.publish("READY")
         rospy.loginfo("Cluefinding ready")
 
@@ -73,7 +73,13 @@ class ClueReaderNode:
             "SIZE": ["SIZE", "S1ZE", "5IZE"],
             "VICTIM": ["VIC", "V1C", "TIM", "V1CT", "VIT"],
             "CRIME": ["CRIM", "CRME", "CR1M", "RIME", "IHE", "1HE"],
+            "TIME": ["TIT"],
             "PLACE": ["PLAC", "PLCE", "LACE"],
+            "MOTIVE": ["OTIVE", "OTIV", "TIVE" ],
+            "WEAPON": ["EAPON", "APON", "4PON", "APOT", "4POT"],
+            "BANDIT": ["DIT", "ADIT", "4DIT"]
+            
+
         }
         for official_name, triggers in mapping.items():
             if any(t in raw_id for t in triggers):
