@@ -10,6 +10,7 @@ class PIDVisionNode:
     def __init__(self):
         rospy.init_node('vision_pid')
         self.bridge = CvBridge()
+        self.prev_frame = None
         
         # Publishers
         self.error_pub = rospy.Publisher("/vision/lane_error", Float32, queue_size=1)
@@ -17,6 +18,7 @@ class PIDVisionNode:
         self.wide_road_pub = rospy.Publisher("/vision/wide_road", Bool, queue_size=1)
         self.ped_pub = rospy.Publisher("/vision/ped_red", Bool, queue_size=1)
         self.tel_pub = rospy.Publisher("/vision/pink_line", Bool, queue_size=1)
+        self.stuck_pub = rospy.Publisher("/vision/paved_stuck", Bool, queue_size=1)
         
         # Subscriber
         self.image_sub = rospy.Subscriber("/B1/rrbot/camera1/image_raw", Image, self.image_callback, queue_size=1)
@@ -31,6 +33,18 @@ class PIDVisionNode:
             #choose FOV to save time processing
             fov = cv_image[int(height*0.6) : height, :] 
             fov_height = fov.shape[0]
+
+            gray_fov = cv2.cvtColor(fov, cv2.COLOR_BGR2GRAY)
+            small_mono = cv2.resize(gray_fov, (64, 64))
+            is_stuck = False
+            
+            if self.prev_frame is not None:
+                diff = cv2.absdiff(small_mono, self.prev_frame)
+                if np.mean(diff) < 1.0: # If the average pixel barely changed
+                    is_stuck = True
+            
+            self.prev_frame = small_mono
+            self.stuck_pub.publish(is_stuck)
             
             # Convert to HSV and threshold for the road color
             hsv = cv2.cvtColor(fov, cv2.COLOR_BGR2HSV)
@@ -117,6 +131,7 @@ class PIDVisionNode:
             cv2.circle(fov, (int(midpoint), scanline_row), 5, (0, 0, 255), -1) 
             cv2.line(fov, (0, scanline_row), (width, scanline_row), (0, 255, 0), 1)
             cv2.imshow("Geometric Vision", fov)
+            cv2.imshow("og", cv_image)
             cv2.waitKey(1)
             
             

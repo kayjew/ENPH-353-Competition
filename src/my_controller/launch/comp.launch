@@ -9,6 +9,16 @@
         type="vision_pid.py" 
         name="vision_pid" 
         output="screen" />
+  
+  <node pkg="my_controller" 
+        type="dirt_pid.py" 
+        name="dirt_pid" 
+        output="screen" />
+
+  <node pkg="my_controller" 
+        type="dirt_vision.py" 
+        name="dirt_vision_pid" 
+        output="screen" />
 
   <!-- PID Node: Calculates steering based on vision error -->
   <node pkg="my_controller" 

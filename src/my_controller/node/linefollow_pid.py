@@ -35,7 +35,7 @@ class LineFollowPIDNode:
     def __init__(self):
         rospy.init_node('linefollow_pid')
         
-        self.pid = PIDController(kp=60, ki=0.1, kd=0.25)
+        self.pid = PIDController(kp=60, ki=0.5, kd=0.25)
         self.current_error = 0.0
         self.target_speed = 1
         

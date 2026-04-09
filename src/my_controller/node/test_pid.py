@@ -5,14 +5,16 @@ import cv2
 import numpy as np
 import sys
 import time
+import math
 
 from std_msgs.msg import String
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge, CvBridgeError
+from gazebo_msgs.msg import ModelState
+from gazebo_msgs.srv import SetModelState
 
 class PIDController:
-    """A simple PID controller for smooth steering."""
     def __init__(self, kp, ki, kd):
         self.kp = kp
         self.ki = ki
@@ -24,148 +26,139 @@ class PIDController:
     def compute(self, error):
         current_time = time.time()
         dt = current_time - self.last_time
-        if dt <= 0.0:
-            dt = 0.001 # Prevent division by zero
-            
+        if dt <= 0.0: dt = 0.001 
         self.integral += error * dt
-        # Anti-windup safety
         self.integral = max(-5.0, min(5.0, self.integral))
-        
         derivative = (error - self.prev_error) / dt
         output = (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
-        
         self.prev_error = error
         self.last_time = current_time
         return output
 
-class linefollowing:
+class DirtRoadTester:
     def __init__(self):
         self.bridge = CvBridge()
-
-        self.lost_line_counter = 0
-        self.finish_triggered = False
-        self.MAX_LOST_FRAMES = 10
-
-        # Setup PID Controller 
-        self.pid = PIDController(kp=20, ki=0.0, kd=0.0)
-
-        # Set-up publisher subscriber relationship
+        # MATCHED: Your highly responsive tuned PID values
+        self.pid = PIDController(kp=40.0, ki=0.1, kd=0.2) 
         self.pub_cmd = rospy.Publisher('/B1/cmd_vel', Twist, queue_size=1)
         self.pub_score = rospy.Publisher('/score_tracker', String, queue_size=1)
+        self.current_frame = None
+        
+        self.teleport_to_dirt_road()
         self.image_sub = rospy.Subscriber('/B1/rrbot/camera1/image_raw', Image, self.callback, queue_size=1)
 
-        # Start timer for Fizz Detective
-        rospy.loginfo("Initializing line follower... starting timer.")
+        rospy.loginfo("Initializing Pool-Proof Dirt Road Tester (Band-Pass Mode)...")
         rospy.sleep(1)
         self.pub_score.publish("rover,123,0,aaaaaa")
 
-    def callback(self, data):
-        if self.finish_triggered:
-            return
-            
-        cmd = Twist()
+    def nothing(self, x): pass
 
-        # Attempts to convert image to cv2
+    def teleport_to_dirt_road(self):
+        rospy.wait_for_service('/gazebo/set_model_state')
         try:
-            cv_image = self.bridge.imgmsg_to_cv2(data, "bgr8")
-        except CvBridgeError as e:
-            print(e)
-            return
+            set_state = rospy.ServiceProxy('/gazebo/set_model_state', SetModelState)
+            state_msg = ModelState()
+            state_msg.model_name = 'B1' 
+            state_msg.pose.position.x, state_msg.pose.position.y, state_msg.pose.position.z = -4.0, -2.25, 0.1 
+            yaw = 0
+            state_msg.pose.orientation.z, state_msg.pose.orientation.w = math.sin(yaw/2), math.cos(yaw/2)
+            set_state(state_msg)
+        except rospy.ServiceException as e: rospy.logerr(f"Teleport failed: {e}")
 
-        height, width, _ = cv_image.shape
-        
-        # 1. Define FOV to save processing (Crop bottom 40%)
-        fov = cv_image[int(height * 0.6) : height, :]
-        fov_height, fov_width, _ = fov.shape
-        
-        # 2. Convert to HSV and threshold for the road color
-        blurred = cv2.medianBlur(fov, 5)
-        hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-        lower_gray = np.array([0, 0, 50])
-        upper_gray = np.array([180, 50, 200])
-        mask = cv2.inRange(hsv, lower_gray, upper_gray)
+    def callback(self, data):
+        try: self.current_frame = self.bridge.imgmsg_to_cv2(data, "bgr8")
+        except CvBridgeError as e: print(e)
 
-        # Clean up noise 
-        kernel = np.ones((5,5), np.uint8)
-        img_final = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-        img_final = cv2.morphologyEx(img_final, cv2.MORPH_CLOSE, kernel)
+    def run(self):
+        cv2.namedWindow("Tuner Dashboard")
+        # MATCHED: All your previous tuned values
+        cv2.createTrackbar("Threshold", "Tuner Dashboard", 160, 255, self.nothing)
+        cv2.createTrackbar("Median Kernel", "Tuner Dashboard", 10, 21, self.nothing)
+        cv2.createTrackbar("Min Sat", "Tuner Dashboard", 20, 255, self.nothing)
+        # NEW: Max Saturation Cap
+        cv2.createTrackbar("Max Sat", "Tuner Dashboard", 125, 255, self.nothing)
 
-        # 3. Find Max Contours
-        contours, _ = cv2.findContours(img_final, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # --- RECOVERY LOGIC ---
-        if len(contours) == 0:
-            self.lost_line_counter += 1
-            cmd.linear.x = 0.0
-            cmd.angular.z = 0.5 # Spin to find road
-            self.pub_cmd.publish(cmd)
-            
-            cv2.imshow("Hybrid Vision", fov)
-            cv2.waitKey(1)
-            return
-            
-        else:
-            self.lost_line_counter = 0
-            
-            # --- VISION LOGIC ---
-            largest = max(contours, key=cv2.contourArea)
-            final_road = np.zeros_like(img_final)
-            cv2.drawContours(final_road, [largest], -1, 255, thickness=cv2.FILLED)
+        rate = rospy.Rate(15) 
+        while not rospy.is_shutdown():
+            if self.current_frame is not None:
+                # 1. Downscale & Crop
+                small = cv2.resize(self.current_frame, (0,0), fx=0.5, fy=0.5)
+                h, w = small.shape[:2]
+                fov = small[int(h*0.6):h, :]
+                fov_h, fov_w = fov.shape[:2]
+                
+                # 2. Convert Colors
+                gray = cv2.cvtColor(fov, cv2.COLOR_BGR2GRAY)
+                hsv = cv2.cvtColor(fov, cv2.COLOR_BGR2HSV)
+                
+                # 3. MASK A: Dark Road (Grayscale INV)
+                k = cv2.getTrackbarPos("Median Kernel", "Tuner Dashboard")
+                if k % 2 == 0: k += 1
+                blurred = cv2.medianBlur(gray, max(1, k))
+                
+                t = cv2.getTrackbarPos("Threshold", "Tuner Dashboard")
+                _, road_mask = cv2.threshold(blurred, t, 255, cv2.THRESH_BINARY_INV) 
 
-            # Find dynamic highest scanline (Look-ahead)
-            x, y, w, h = cv2.boundingRect(largest)
-            # Drop down 10% from the top of the road to get a solid slice
-            scanline_row = int(min(y + h * 0.10, fov_height - 1))
-            
-            row_pixels = final_road[scanline_row, :]
-            road_indices = np.where(row_pixels == 255)[0]
+                # 4. MASK B: Saturation Band-Pass
+                s_channel = hsv[:, :, 1]
+                s_min = cv2.getTrackbarPos("Min Sat", "Tuner Dashboard")
+                s_max = cv2.getTrackbarPos("Max Sat", "Tuner Dashboard")
+                
+                # We use inRange to get everything BETWEEN the two values
+                s_mask = cv2.inRange(s_channel, s_min, s_max)
 
-            if len(road_indices) == 0:
-                cmd.linear.x = 0.0
-                cmd.angular.z = 0.5
+                # 5. COMBINE MASKS
+                mask = cv2.bitwise_and(road_mask, s_mask)
+
+                # Cleanup noise
+                kernel = np.ones((5,5), np.uint8)
+                mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+
+                # 6. LARGEST CONTOUR LOGIC
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                target_x = fov_w / 2.0
+                road_found = False
+
+                if contours:
+                    largest_cnt = max(contours, key=cv2.contourArea)
+                    if cv2.contourArea(largest_cnt) > 500:
+                        M = cv2.moments(largest_cnt)
+                        if M["m00"] > 0:
+                            target_x = int(M["m10"] / M["m00"])
+                            road_found = True
+                            cv2.drawContours(fov, [largest_cnt], -1, (0, 255, 0), 2)
+
+                # 7. PID & DRIVING
+                cmd = Twist()
+                if not road_found:
+                    cmd.angular.z = 0.5 
+                else:
+                    error = (fov_w / 2.0) - target_x
+                    normalized_error = error / (fov_w / 2.0)
+                    cmd.linear.x = 0.4 
+                    cmd.angular.z = self.pid.compute(normalized_error)
                 self.pub_cmd.publish(cmd)
-                return
 
-            left_edge = road_indices[0]
-            right_edge = road_indices[-1]
+                # 8. DEBUG VIEW
+                cv2.circle(fov, (int(target_x), int(fov_h/2)), 5, (0, 0, 255), -1) 
+                mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+                
+                # Show current range on mask
+                cv2.putText(mask_bgr, f"S-Range: {s_min}-{s_max}", (10, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-            # --- GEOMETRIC CENTERING ("Comparing Levers") ---
-            # By calculating the true midpoint between the two visible edges, 
-            # we perfectly balance the left and right gap distances.
-            midpoint = (left_edge + right_edge) / 2.0
+                cv2.imshow("Tuner Dashboard", np.hstack((fov, mask_bgr)))
+                cv2.imshow("og view", self.current_frame)
             
-            # The error is the distance from the camera center to this midpoint.
-            raw_error = (fov_width / 2.0) - midpoint
-
-            # Normalize error to [-1.0, 1.0]
-            normalized_error = raw_error / (fov_width / 2.0)
-
-            # --- PID CONTROL LOGIC ---
-            cmd.linear.x = 0.6 # Forward speed
-            
-            # Steer using the PID output
-            steering_output = self.pid.compute(normalized_error)
-            
-            # Clamp the steering to prevent sudden violent jerks
-            cmd.angular.z = max(-1.5, min(1.5, steering_output))
-
-            self.pub_cmd.publish(cmd)
-
-            # --- DEBUG DISPLAY ---
-            # Draw the target midpoint we are aiming for
-            cv2.circle(fov, (int(midpoint), scanline_row), 5, (0, 0, 255), -1) 
-            # Draw a line showing the scanline we used
-            cv2.line(fov, (0, scanline_row), (fov_width, scanline_row), (0, 255, 0), 1)
-            cv2.imshow("Hybrid Vision", fov)
-            cv2.waitKey(1)
+            cv2.waitKey(5)
+            rate.sleep()
 
 def main(args):
-    rospy.init_node('timetrials_move', anonymous=True)
-    lf = linefollowing()
-    try:
-        rospy.spin()
-    except KeyboardInterrupt:
-        print("Shutting down")
+    rospy.init_node('dirt_road_test', anonymous=True)
+    tester = DirtRoadTester()
+    try: tester.run()
+    except KeyboardInterrupt: pass
     cv2.destroyAllWindows()
 
 if __name__ == '__main__':
