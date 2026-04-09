@@ -33,17 +33,20 @@ class BrainNode:
         self.ped_red_detected = False
         self.pedestrian_in_way = False
         self.lidar_error = 0.0
+
+        #Peek values
         self.clue_active = False
         self.clue_offset = 0.0
         self.nudge_factor = 0.6
         self.was_peeking = False
         self.clue_reader_ready = False
+        self.debug = False
 
         # Peek unwind state
-        self.peek_unwind_direction = 0.0   # sign of offset when we stopped peeking
-        self.peek_unwind_strength = 0.0    # magnitude to replay back
-        self.stable_frame_count = 0        # consecutive frames pid has been calm
-        self.STABLE_FRAMES_NEEDED = 8      # how many calm frames before handing back to PID
+        self.peek_unwind_direction = 0.0
+        self.peek_unwind_strength = 0.0    
+        self.stable_frame_count = 0        
+        self.STABLE_FRAMES_NEEDED = 8      
         
         # lost frame tracking
         self.lost_frame_counter = 0
@@ -89,7 +92,8 @@ class BrainNode:
             self.peek_unwind_direction = 1.0 if self.clue_offset > 0 else -1.0
             self.peek_unwind_strength  = min(abs(self.clue_offset), 1.0)
             self.stable_frame_count    = 0
-            rospy.loginfo(f"[Peek] Storing unwind: dir={self.peek_unwind_direction:.1f} strength={self.peek_unwind_strength:.2f}")
+            if self.debug:    
+                rospy.loginfo(f"Store unpeek dir={self.peek_unwind_direction:.1f} strength={self.peek_unwind_strength:.2f}")
 
     def offset_callback(self, msg):
         self.clue_offset = msg.data
@@ -180,8 +184,8 @@ class BrainNode:
                                 out_twist.angular.z = max(-0.5, min(0.5, raw))
                             else:
                                 out_twist.angular.z = (self.pid_twist.angular.z * 0.2) + (self.clue_offset * -1)
-                                
-                            rospy.loginfo_throttle(0.2, f"HEAVY PEEK: {self.clue_offset:.2f}")
+                            if self.debug:    
+                                rospy.loginfo_throttle(0.2, f"Peek: {self.clue_offset:.2f}")
                         
                         # Undo peek
                         elif self.was_peeking:
@@ -192,11 +196,12 @@ class BrainNode:
 
                             #Prevent PID from going crazy
                             if self.peek_unwind_strength < 0.05:
-                                rospy.loginfo("Unwind complete. Resuming PID control.")
+                                if self.debug:
+                                    rospy.loginfo("Undo peek")
                                 self.was_peeking = False
                                 self.peek_unwind_strength = 0.0
-                            
-                            rospy.loginfo_throttle(0.1, f"[Unwind] dir={self.peek_unwind_direction:.1f} str={self.peek_unwind_strength:.3f}")
+                            if self.debug:
+                                rospy.loginfo_throttle(0.1, f"[Unwind] dir={self.peek_unwind_direction:.1f} str={self.peek_unwind_strength:.3f}")
                         else:
                             out_twist.linear.x = self.pid_twist.linear.x
                             out_twist.angular.z = self.pid_twist.angular.z

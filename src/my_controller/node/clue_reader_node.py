@@ -9,88 +9,64 @@ from cv_bridge import CvBridge, CvBridgeError
 from sensor_msgs.msg import Image
 import tensorflow as tf
 from std_msgs.msg import Bool, String, Float32
-from geometry_msgs.msg import Twist
 from collections import Counter
+from clue_detection.model_utils import BoardProcessor, int_to_char
 
 rospack = rospkg.RosPack()
-# Get the path to my_controller package
+# Get model
 pkg_path = rospack.get_path('my_controller')
+
+#Adjustables
 MODEL_PATH = os.path.join(pkg_path, 'models', 'clue_reader_local.h5')
 SHOW_DEBUG_VIEW = True
 TEAM_ID         = 'TeamName'
 PASSWORD        = 'password'
 CAMERA_TOPIC    = 'B1/rrbot/camera1/image_raw'
 PROCESS_EVERY_N = 1
-CONFIRM_COUNT   = 3   # votes needed out of VOTE_WINDOW
-VOTE_WINDOW     = 5   # rolling window size for majority vote
+CONFIRM_COUNT   = 3
+VOTE_WINDOW     = 5   
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-from clue_detection.model_utils import BoardProcessor, int_to_char
 
 class ClueReaderNode:
     def __init__(self):
         rospy.init_node('clue_reader_node', anonymous=True)
+        
+        # Publishers
         self.offset_pub = rospy.Publisher("/clue/horizontal_offset", Float32, queue_size=1)
         self.status_pub = rospy.Publisher("/clue/status", String, queue_size=1, latch=True)
+        self.score_pub = rospy.Publisher('/score_tracker', String, queue_size=10)
+        self.processing_pub = rospy.Publisher("/clue/active_processing", Bool, queue_size=1)
 
+        # States
         self.team_id         = TEAM_ID
         self.password        = PASSWORD
         self.process_every_n = PROCESS_EVERY_N
         self.frame_count     = 0
         self.last_board_x    = 250
-
-        self.last_val           = None
-        self.last_type_id       = None
-        self.consecutive_count  = 0
-        self.published_clue_ids = set()
+        self.published_ids   = set()
         self.last_publish_time = 0
-        self.PUBLISH_COOLDOWN = 3.0  # seconds
+        self.PUBLISH_COOLDOWN = 3.0 
 
-        self.last_match_key = ""
-        self.consecutive_count = 0
-        self.published_ids = set()
-
+        #Clue info
         self.current_clue_index = 1
         self.clue_order = ['SIZE', 'VICTIM', 'CRIME', 'TIME', 'PLACE', 'MOTIVE', 'WEAPON', 'BANDIT']
-
         self.vote_window = []
 
-        self.last_published_val = None
-
-        # Gate: don't accumulate votes until the robot has moved at least once
-        self.robot_has_moved = False
-
-        self.id_map = {
-            "SIZE": 1,
-            "VICTIM": 2,
-            "CRIME": 3,
-            "TIME": 4,
-            "PLACE": 5,
-            "MOTIVE": 6,
-            "WEAPON": 7,
-            "BANDIT": 8,
-        }
-
+        # Model & Tools
         self.model = tf.keras.models.load_model(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
         if not self.model:
-            rospy.logerr("Model not found!")
+            rospy.logerr("Model not found")
 
         self.bridge    = CvBridge()
         self.processor = BoardProcessor()
-        self.score_pub = rospy.Publisher('/score_tracker', String, queue_size=10)
-        self.processing_pub = rospy.Publisher("/clue/active_processing", Bool, queue_size=1)
 
-        rospy.Subscriber(CAMERA_TOPIC, Image, self.image_callback, queue_size=1, buff_size=2**24)
-        rospy.Subscriber("/B1/cmd_vel", Twist, self.cmd_vel_callback)
+        # Subscribers
+        rospy.Subscriber(CAMERA_TOPIC, Image, self.kk, queue_size=1, buff_size=2**24)
         self.status_pub.publish("READY")
-        rospy.loginfo("[ClueReader] Clue finding active — waiting for robot to move before scoring")
+        rospy.loginfo("Cluefinding ready")
 
-    def cmd_vel_callback(self, msg):
-        if not self.robot_has_moved:
-            if abs(msg.linear.x) > 0.01 or abs(msg.angular.z) > 0.01:
-                self.robot_has_moved = True
-                rospy.loginfo("[ClueReader] Robot movement detected — clue scoring active")
-
+    #Publish even if clue type isnt perfect
     def get_fuzzy_id(self, raw_id):
         raw_id = raw_id.upper()
         mapping = {
@@ -104,13 +80,7 @@ class ClueReaderNode:
                 return official_name
         return None
 
-    def clue_num(self, clue_type_str):
-        clues = ['SIZE', 'VICTIM', 'CRIME', 'TIME', 'PLACE', 'MOTIVE', 'WEAPON', 'BANDIT']
-        for i, c in enumerate(clues):
-            if c in clue_type_str.upper():
-                return i + 1
-        return None
-
+    #Get back on track with boards if needed
     def _resolve_board_num(self, fuzzy_type):
         for i in range(self.current_clue_index - 1, len(self.clue_order)):
             if fuzzy_type and fuzzy_type == self.clue_order[i]:
@@ -124,7 +94,9 @@ class ClueReaderNode:
                     return board_num
         return self.current_clue_index
 
+    #Main image processing
     def image_callback(self, msg):
+        #Blind robot for 3s to get away from board after publishing
         if (rospy.get_time() - self.last_publish_time) < self.PUBLISH_COOLDOWN:
             self.processing_pub.publish(False)
             return
@@ -142,6 +114,7 @@ class ClueReaderNode:
             self.vote_window = []
             return
 
+        #Get board and parse clue 
         raw_type, raw_val = result
         fuzzy_type = self.get_fuzzy_id(raw_type)
         board_num = self._resolve_board_num(fuzzy_type)
@@ -157,8 +130,7 @@ class ClueReaderNode:
         normalized_offset = (self.last_board_x - (img_w / 2)) / (img_w / 2)
         self.offset_pub.publish(normalized_offset)
 
-        if not self.robot_has_moved: return
-
+        #Cleanup inputs
         clean_val = raw_val.replace(" ", "").strip()
         if not clean_val: return
 
@@ -168,6 +140,7 @@ class ClueReaderNode:
 
         most_common_val, vote_count = Counter(self.vote_window).most_common(1)[0]
         
+        #Polling to avoid incorrect answer
         if vote_count >= CONFIRM_COUNT:
             submission = f"{self.team_id},{self.password},{board_num},{most_common_val}"
             self.score_pub.publish(submission)
@@ -176,6 +149,7 @@ class ClueReaderNode:
             self.published_ids.add(board_num)
             self.last_publish_time = rospy.get_time() 
             
+            #Publish
             rospy.loginfo(f"PUBLISHED: {submission}")
 
             self.current_clue_index = board_num + 1
@@ -184,6 +158,7 @@ class ClueReaderNode:
     def process_frame(self, bgr_image):
         board_crop = self.detect_billboard(bgr_image)
 
+        #Debug if no board is detected
         if board_crop is None:
             if SHOW_DEBUG_VIEW:
                 display_img = cv2.resize(bgr_image, (500, 300))
@@ -194,6 +169,7 @@ class ClueReaderNode:
 
         board_crop = cv2.resize(board_crop, (500, 300), interpolation=cv2.INTER_CUBIC)
 
+        #Show location of clue parts
         if SHOW_DEBUG_VIEW:
             debug_img = board_crop.copy()
             cv2.rectangle(debug_img, (self.processor.top_x1, self.processor.top_y1),
@@ -205,6 +181,7 @@ class ClueReaderNode:
 
         gray = cv2.cvtColor(board_crop, cv2.COLOR_BGR2GRAY)
 
+        #Get strings
         try:
             type_list, val_list = self.processor.segment_both(gray)
             c_type = self.classify_sequence(type_list)
@@ -215,12 +192,14 @@ class ClueReaderNode:
         except:
             return None
 
+    #Get strings
     def classify_sequence(self, char_list):
         if not char_list: return ""
         res = ""
         for item in char_list:
             if isinstance(item, str) and item == "SPACE":
                 res += " "
+            #Apply NN
             else:
                 inp = item.reshape(1, 32, 32, 1) / 255.0
                 pred = self.model.predict(inp, verbose=0)
@@ -231,6 +210,8 @@ class ClueReaderNode:
         return " ".join(filtered_words) if filtered_words else ""
 
     def detect_billboard(self, bgr_image):
+
+        #Apply colour mask, find valid boards
         img_h, img_w = bgr_image.shape[:2]
         hsv = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, np.array([100, 100, 20]), np.array([140, 255, 255]))
@@ -239,6 +220,7 @@ class ClueReaderNode:
         if not contours: return None
 
         valid_boards = []
+        #Skip boards that are too small, high, wrong shape
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < 3000: continue
@@ -251,6 +233,7 @@ class ClueReaderNode:
         if not valid_boards: return None
         valid_boards.sort(key=cv2.contourArea, reverse=True)
 
+        #Choose the larger board
         if len(valid_boards) > 1:
             area1 = cv2.contourArea(valid_boards[0])
             area2 = cv2.contourArea(valid_boards[1])
@@ -266,6 +249,7 @@ class ClueReaderNode:
 
         peri = cv2.arcLength(best, True)
         approx = cv2.approxPolyDP(best, 0.02 * peri, True)
+        #Dewarp
         if len(approx) == 4:
             src = self._order_points(np.float32([pt[0] for pt in approx]))
             dst = np.float32([[0,0], [w,0], [w,h], [0,h]])
@@ -283,12 +267,6 @@ class ClueReaderNode:
         rect[0], rect[2] = pts[np.argmin(s)], pts[np.argmax(s)]
         rect[1], rect[3] = pts[np.argmin(d)], pts[np.argmax(d)]
         return rect
-
-    def publish_clue(self, loc, prediction):
-        msg = f"{self.team_id},{self.password},{loc},{prediction}"
-        self.score_pub.publish(String(data=msg))
-        self.processing_pub.publish(False)
-        rospy.loginfo(f"PUBLISHED: {msg}")
 
     def run(self): rospy.spin()
 
