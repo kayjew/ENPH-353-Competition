@@ -2,6 +2,7 @@
 import os
 import sys
 import rospy
+import rospkg
 import cv2
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
@@ -9,8 +10,11 @@ from sensor_msgs.msg import Image
 import tensorflow as tf
 from std_msgs.msg import Bool, String, Float32
 
+rospack = rospkg.RosPack()
+# Get the path to my_controller package
+pkg_path = rospack.get_path('my_controller')
+MODEL_PATH = os.path.join(pkg_path, 'models', 'clue_reader_local.h5')
 SHOW_DEBUG_VIEW = True
-MODEL_PATH      = '/home/fizzer/ENPH-353-Competition/src/clue_detection/models/clue_reader_local.h5'
 TEAM_ID         = 'TeamName'
 PASSWORD        = 'password'
 CAMERA_TOPIC    = 'B1/rrbot/camera1/image_raw'

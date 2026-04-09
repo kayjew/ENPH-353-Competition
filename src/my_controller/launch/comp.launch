@@ -21,5 +21,10 @@
         type="statemachine.py" 
         name="statemachine" 
         output="screen" />
+
+  <node pkg="my_controller" 
+        type="clue_reader_node.py" 
+        name="clue_reader" 
+        output="screen" />
   
 </launch>

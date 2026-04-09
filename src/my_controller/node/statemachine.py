@@ -160,9 +160,9 @@ class BrainNode:
                    if self.active_mode == "PID":
                         if self.clue_active:
                             if self.clue_offset > 0:
-                                out_twist.linear.x = 0.1
+                                out_twist.linear.x = 0.02
                             else:
-                                out_twist.linear.x = 0.01
+                                out_twist.linear.x = 0.03
                             self.was_peeking = True
                             
                             if abs(self.clue_offset) > 0.4:
