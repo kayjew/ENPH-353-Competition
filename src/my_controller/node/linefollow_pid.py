@@ -35,12 +35,12 @@ class LineFollowPIDNode:
     def __init__(self):
         rospy.init_node('linefollow_pid')
         
-        self.pid = PIDController(kp=60, ki=0.5, kd=0.25)
+        self.pid = PIDController(kp=65, ki=0.4, kd=0.15)
         self.current_error = 0.0
         self.target_speed = 1
         
         #Introduce bias in pid
-        self.CLUE_BIASES = [-0.1, 0.1, 0.0, -0.15, 0.1, 0.1, -0.1, 0.1]
+        self.CLUE_BIASES = [0.1, 0.1, -0.05, -0.15, 0.1, 0.1, -0.1, 0.1]
         self.current_bias = self.CLUE_BIASES[0] 
         
         # subscribers

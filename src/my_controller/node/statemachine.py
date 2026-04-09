@@ -48,7 +48,7 @@ class BrainNode:
         self.nudge_factor = 0.6
         self.was_peeking = False
         self.clue_reader_ready = False
-        self.debug = False
+        self.debug = True
 
         # Peek unwind state
         self.peek_unwind_direction = 0.0
@@ -94,6 +94,7 @@ class BrainNode:
         rospy.Subscriber("/clue/status", String, self.clue_status_callback)
         rospy.Subscriber("/vision/paved_stuck", Bool, self.paved_stuck_callback)
         rospy.Subscriber("/vision/dirt_stuck", Bool, self.dirt_stuck_callback)
+        rospy.Subscriber("/score_tracker", String, self.clue_submitted_callback)
         
         rospy.loginfo(f"Brain Node Initialized. Starting control loop in Mode: {self.active_mode}")
 
@@ -146,6 +147,17 @@ class BrainNode:
 
     def dirt_stuck_callback(self, msg):
         self.dirt_stuck = msg.data
+
+    def clue_submitted_callback(self, msg):
+        """Parses the board ID from the submission string and updates bias."""
+        try:
+            # submission format: "team_id,password,board_num,value"
+            parts = msg.data.split(',')
+            if len(parts) >= 3:
+                self.board_id = int(parts[2]) # Get the 3rd element
+        except Exception as e:
+            rospy.logwarn(f"Could not parse {e}")
+
 
         
     def teleport_to_dirt(self):
@@ -229,12 +241,13 @@ class BrainNode:
                 if self.road_wide:
                     self.wide_frame_count += 1
                     rospy.loginfo(f"Wide road detected! Count is: {self.wide_frame_count}")
-                    if self.wide_frame_count > 15:
-                        rospy.loginfo("Road is wide. Entering Roundabout.")
-                        self.action_state = ActionState.STOPPED
-                        self.course_section = CourseSection.TELEPORT_1
-                        self.prev_lidar_reading = False
-                        self.wide_frame_count =0
+                    if (self.board_id > 3):
+                        if self.wide_frame_count > 15:
+                            rospy.loginfo("Road is wide. Entering Roundabout.")
+                            self.action_state = ActionState.STOPPED
+                            self.course_section = CourseSection.TELEPORT_1
+                            self.prev_lidar_reading = False
+                            self.wide_frame_count =0
                 else:
                     self.wide_frame_count =0
 
@@ -327,7 +340,7 @@ class BrainNode:
 
                         #peeking
                         if self.clue_active:
-                            out_twist.linear.x = 0.02 if self.clue_offset > 0 else 0.03
+                            out_twist.linear.x = 0.01 if self.clue_offset > 0 else 0.02
                             
                             self.was_peeking = True
                             
@@ -346,13 +359,13 @@ class BrainNode:
                         
                         # Undo peek
                         elif self.was_peeking:
-                            unwind_angular = self.peek_unwind_direction * self.peek_unwind_strength * 1.2
-                            out_twist.linear.x  = 0.15  
+                            unwind_angular = self.peek_unwind_direction * self.peek_unwind_strength * 1.4
+                            out_twist.linear.x  = 0.08 
                             out_twist.angular.z = unwind_angular
                             self.peek_unwind_strength *= 0.92
 
                             #Prevent PID from going crazy
-                            if self.peek_unwind_strength < 0.05:
+                            if self.peek_unwind_strength < 0.02:
                                 if self.debug:
                                     rospy.loginfo("Undo peek")
                                 self.was_peeking = False
@@ -362,8 +375,6 @@ class BrainNode:
                         else:
                             out_twist.linear.x = self.pid_twist.linear.x
                             out_twist.angular.z = self.pid_twist.angular.z
-                        out_twist.linear.x = self.pid_twist.linear.x
-                        out_twist.angular.z = self.pid_twist.angular.z
                     elif self.active_mode == "DIRT":
                         out_twist.linear.x = self.dirt_pid_twist.linear.x
                         out_twist.angular.z = self.dirt_pid_twist.angular.z
